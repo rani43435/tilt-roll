@@ -1,6 +1,13 @@
 # Tilt Roll
 
-A small 3D ball game made in Unity. Open it on your phone and tilt the phone to roll the ball through the level: collect the gems, reach the checkpoints and roll into the golden ring at the end.
+Six small 3D games in one, made in Unity. Open it on your phone and tilt the phone to play. Every game uses the same tilt controls:
+
+- **Level 1 · Sky Garden**, **Level 2 · Forest Canyon**, **Level 3 · Sunset Ruins**: roll the ball through the course, collect gems, reach the goal.
+- **Maze**: tilt the board, not the ball, and roll it into the hole.
+- **Snowboard**: lean to carve down the mountain and dodge trees.
+- **Flight**: steer the plane through the rings.
+
+Pick a game from **Choose Game** in the menu.
 
 **Play:** https://rani43435.github.io/tilt-roll/
 
