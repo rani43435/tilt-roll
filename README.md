@@ -9,6 +9,8 @@ Six small 3D games in one, made in Unity. Open it on your phone and tilt the pho
 
 Pick a game from **Choose Game** in the menu.
 
+**WIT Bluetooth head sensor (WT9011DCL):** open the page in Chrome (computer or Android; on iPhone use the Bluefy browser), tap **Connect WIT Sensor**, pick the sensor, then **Start** to calibrate.
+
 **Play:** https://rani43435.github.io/tilt-roll/
 
 - On a phone: tap **Start**, allow motion access if your phone asks, hold the phone the way you want to play while it calibrates, then tilt.
