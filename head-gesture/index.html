@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Head Gesture Control</title>
-<!-- Built 2026-10-25T16:22:51.126Z by tools/build.mjs from 56 modules. Do not edit; edit src/ and rebuild. -->
+<!-- Built 2026-10-27T09:52:28.332Z by tools/build.mjs from 57 modules. Do not edit; edit src/ and rebuild. -->
 <style>
 /* Head Gesture Control — instrument-panel styling.
    Palette: cool instrument paper, ink, one signal amber for detections,
@@ -287,6 +287,17 @@ tr.kind-reject td:nth-child(3) { color: var(--ink-2); }
 .toast-ok { background: #24563a; }
 .toast-warn { background: var(--bad); }
 .toast.out { opacity: 0; }
+
+/* ---------------------------------------------------------------- gesture badge */
+.gesture-badge { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); z-index: 50; display: flex; gap: 8px; align-items: center; pointer-events: none; }
+.gesture-badge[hidden] { display: none; }
+.gesture-badge > * { pointer-events: auto; }
+.gb-flash { background: rgba(16, 24, 32, 0.85); color: #fff; font-weight: 700; font-size: 22px; padding: 8px 16px; border-radius: 14px; opacity: 0; transition: opacity 0.25s; pointer-events: none; }
+.gb-flash.on { opacity: 1; transition: none; }
+.gb-chip { font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel, #fff); color: var(--ink); cursor: pointer; }
+.gb-chip[hidden] { display: none; }
+.gb-video.on { background: #ffb020; border-color: #ffb020; color: #1a1300; }
+.gb-lock { background: var(--bad); border-color: var(--bad); color: #fff; }
 
 /* ---------------------------------------------------------------- responsive */
 @media (max-width: 1150px) {
@@ -1476,6 +1487,9 @@ const GESTURE_LABELS = Object.freeze({
   FLICK_DOWN: 'Flick Down',
   FLICK_LEFT: 'Flick Left',
   FLICK_RIGHT: 'Flick Right',
+  // reported by HeadExtras (not by the recognizer)
+  LONG_TILT_LEFT: 'Long Tilt Left',
+  LONG_TILT_RIGHT: 'Long Tilt Right',
 });
 
 /** Score label shown wherever a score is displayed. The detectors are rule-based, not ML. */
@@ -3419,7 +3433,13 @@ class ActionMapper extends Emitter {
    * @returns {{action:string, gesture:string, context:string, t:number, event:Object}|null}
    */
   handle(gestureEvent) {
-    const action = this.resolve(gestureEvent.type);
+    // Optional interceptor (HeadExtras): false = swallow (locked), string = override action.
+    const over = this.interceptor ? this.interceptor(gestureEvent, this.context) : undefined;
+    if (over === false) {
+      this.emit('blocked', { gesture: gestureEvent.type, context: this.context });
+      return null;
+    }
+    const action = over || this.resolve(gestureEvent.type);
     if (!action) {
       this.emit('unmapped', { gesture: gestureEvent.type, context: this.context });
       return null;
@@ -5424,6 +5444,112 @@ class MountCalibrator extends Emitter {
 return { MountCalibrator };
 })();
 
+// ---- src/actions/HeadExtras.js
+__m["src/actions/HeadExtras.js"] = (() => {
+const { Emitter } = __m["src/core/Emitter.js"];
+
+/**
+ * HEAD EXTRAS — lock, Home and video mode on top of the Navigation gestures.
+ * The recognizer is NOT changed: these only look at gestures it already reported
+ * and at the head pose afterwards.
+ *
+ *  - long tilt LEFT  (tilt held ~1.3 s)  → lock / unlock head control
+ *  - long tilt RIGHT (tilt held ~1.3 s)  → Home
+ *  - video mode (switched on in the TV screen / badge): tilt right = play/pause,
+ *    flick ◀ ▶ = seek, flick ▲ ▼ = volume, tilt left = Back (and leaves video mode)
+ *
+ * Same behaviour as the Pocket TV app (android/…/Engine.kt).
+ *
+ * Events: 'long-tilt' {right, t}, 'changed' {locked, video}
+ */
+const VIDEO_MAP = Object.freeze({
+  TILT_RIGHT: 'playPause',
+  FLICK_LEFT: 'seekBackward',
+  FLICK_RIGHT: 'seekForward',
+  FLICK_UP: 'volumeUp',
+  FLICK_DOWN: 'volumeDown',
+});
+
+class HeadExtras extends Emitter {
+  /**
+   * @param {{holdMs?:number, tiltAmplitude?:() => number}} opts
+   *   tiltAmplitude: the tilt threshold of the active profile (degrees)
+   */
+  constructor({ holdMs = 1300, tiltAmplitude = () => 9 } = {}) {
+    super();
+    this.holdMs = holdMs;
+    this.tiltAmplitude = tiltAmplitude;
+    this.enabled = true;
+    this.locked = false;
+    this.video = false;
+    this._hist = []; // [t, roll] of the last ~0.6 s
+    this._hold = null; // {right, baseline, sign, since}
+  }
+
+  setVideo(on) {
+    if (this.video === !!on) return;
+    this.video = !!on;
+    this.emit('changed', this.state);
+  }
+
+  setLocked(on) {
+    if (this.locked === !!on) return;
+    this.locked = !!on;
+    this.emit('changed', this.state);
+  }
+
+  get state() {
+    return { locked: this.locked, video: this.video };
+  }
+
+  /** Feed every processed frame (features relative to the calibrated neutral). */
+  onFrame(f) {
+    this._hist.push([f.t, f.roll]);
+    while (this._hist.length > 2 && this._hist[0][0] < f.t - 600) this._hist.shift();
+    const h = this._hold;
+    if (!h) return;
+    if ((f.roll - h.baseline) * h.sign < 0.6 * this.tiltAmplitude()) {
+      this._hold = null; // head came back: it was a normal tilt
+      return;
+    }
+    if (f.t - h.since >= this.holdMs) {
+      this._hold = null;
+      if (!h.right) this.setLocked(!this.locked);
+      this.emit('long-tilt', { right: h.right, t: f.t });
+    }
+  }
+
+  /** A gesture was recognised: start watching for a long tilt. */
+  onGesture(ev) {
+    if (!this.enabled) return;
+    if (ev.type !== 'TILT_LEFT' && ev.type !== 'TILT_RIGHT') return;
+    const last = this._hist[this._hist.length - 1];
+    if (!last) return;
+    const base = (this._hist.find(([t]) => t >= last[0] - 450) || this._hist[0])[1];
+    const d = last[1] - base;
+    if (Math.abs(d) < 1) return;
+    this._hold = { right: ev.type === 'TILT_RIGHT', baseline: base, sign: Math.sign(d), since: last[0] };
+  }
+
+  /**
+   * Decide what a recognised gesture does.
+   * @returns {false|string|undefined} false = swallow (locked), string = action to use
+   *   instead of the mapping, undefined = use the normal mapping
+   */
+  intercept(ev) {
+    if (!this.enabled) return undefined;
+    if (this.locked) return false;
+    if (this.video) {
+      if (VIDEO_MAP[ev.type]) return VIDEO_MAP[ev.type];
+      if (ev.type === 'TILT_LEFT') this.setVideo(false);
+    }
+    return undefined;
+  }
+}
+
+return { VIDEO_MAP, HeadExtras };
+})();
+
 // ---- src/ui/AppController.js
 __m["src/ui/AppController.js"] = (() => {
 const { Emitter } = __m["src/core/Emitter.js"];
@@ -5440,6 +5566,7 @@ const { DEFAULT_AXIS_CONFIG, validateAxisConfig } = __m["src/processing/AxisMapp
 const { deepClone, deepMerge } = __m["src/gestures/params.js"];
 const { MountCalibrator } = __m["src/calibration/MountCalibrator.js"];
 const { WitMotionBleProvider } = __m["src/sensor/providers/WitMotionBleProvider.js"];
+const { HeadExtras } = __m["src/actions/HeadExtras.js"];
 
 /**
  * APPLICATION CONTROLLER
@@ -5498,8 +5625,34 @@ class AppController extends Emitter {
       this.pipeline.calibrator.isCalibrated = false;
       this.emit('mount-changed', m);
     });
+    // Lock / Home / video mode (Navigation profile only; the recognizer is unchanged).
+    this.extras = new HeadExtras({ tiltAmplitude: () => this.pipeline.params?.tilt?.minAmplitude ?? 9 });
+    this.extras.enabled = this.mappingPreset === 'nav';
+    this.extras.video = !!s.videoMode;
+    this.mapper.interceptor = (ev) => this.extras.intercept(ev);
+    this.pipeline.on('gesture', (ev) => this.extras.onGesture(ev));
+    this.extras.on('changed', (st) => {
+      if (this.settings.videoMode !== st.video) this.saveSettings({ videoMode: st.video });
+      this.emit('extras-changed', st);
+    });
+    this.extras.on('long-tilt', ({ right, t }) => {
+      const gesture = right ? 'LONG_TILT_RIGHT' : 'LONG_TILT_LEFT';
+      if (!right) {
+        this.emit('extras-gesture', { gesture, label: this.extras.locked ? 'locked' : 'unlocked' });
+        return;
+      }
+      if (this.extras.locked) return;
+      this.extras.setVideo(false);
+      const cmd = { action: 'home', gesture, context: this.mapper.context, t, event: { type: gesture, t } };
+      this.logger?.log('action', t, { action: 'home', gesture, context: cmd.context });
+      this.emit('action', cmd);
+    });
+    this.profiles.on('changed', () => { this.extras.enabled = this.mappingPreset === 'nav'; });
+    this.mapper.on('blocked', (b) => this.emit('extras-gesture', { gesture: b.gesture, label: 'locked' }));
+
     for (const ev of ['gesture', 'action', 'reject', 'gap']) this.pipeline.on(ev, (x) => this.emit(ev, x));
     this.pipeline.on('frame', (fr) => {
+      this.extras.onFrame(fr.features);
       this.lastFrame = fr;
       this.emit('frame', fr);
     });
@@ -7921,7 +8074,8 @@ class TvView {
     this.logEl = h('div.cmd-log');
     fill(this.el,
       h('header.view-head', h('h2', 'Pocket TV'),
-        h('p.lede', 'Your head becomes the TV remote: small flicks = arrow keys, small tilt right = OK, tilt left = Back. Works with the RayNeo Pocket TV (Google TV) over Wi-Fi.')),
+        h('p.lede', 'Your head becomes the TV remote: small flicks = arrow keys, small tilt right = OK, tilt left = Back. Works with the RayNeo Pocket TV (Google TV) over Wi-Fi.'),
+        h('p.hint', 'Hold a tilt RIGHT ~1.5 s = Home. Hold a tilt LEFT ~1.5 s = lock / unlock. Video mode (top right): tilt right = play/pause, flick ◀ ▶ = seek, flick ▲ ▼ = volume.')),
       navProfile ? null : h('div.panel.notice',
         h('p', 'Tip: the Navigation profile (small movements) is made for this.'),
         h('button.small', { onclick: () => this.app.profiles.setActive('nav') }, 'Use Navigation profile')),
@@ -7991,6 +8145,7 @@ async function boot() {
       profileHost),
     h('div.shell', nav, main, dock),
   );
+  mountGestureBadge(app);
 
   const views = Object.fromEntries(NAV.map((n) => [n.id, new n.View(app)]));
   let current = null;
@@ -8084,6 +8239,38 @@ boot().catch((err) => {
   const root = document.getElementById('app');
   if (root) root.textContent = `Startup failed: ${err.message}`;
 });
+
+/** Small corner badge: the last gesture (▲ ▼ ◀ ▶ OK Back Home ⏯ …), plus 🔒 / video state. */
+const BADGE_ACTIONS = {
+  up: '▲', down: '▼', left: '◀', right: '▶', select: 'OK', back: '↩ Back', home: '⌂ Home',
+  playPause: '⏯', seekForward: '⏩', seekBackward: '⏪', volumeUp: '🔊 +', volumeDown: '🔉 −',
+};
+function mountGestureBadge(app) {
+  const flash = h('span.gb-flash');
+  const lock = h('button.gb-chip.gb-lock', { title: 'Hold a tilt LEFT ~1.5 s to lock / unlock', onclick: () => app.extras.setLocked(!app.extras.locked) }, '🔒 locked');
+  const video = h('button.gb-chip.gb-video', { title: 'Video mode: tilt right = play/pause, flick ◀ ▶ = seek, ▲ ▼ = volume', onclick: () => app.extras.setVideo(!app.extras.video) });
+  const el = h('div.gesture-badge', { 'aria-live': 'polite' }, flash, lock, video);
+  document.body.append(el);
+  let timer = null;
+  const show = (text) => {
+    flash.textContent = text;
+    flash.classList.add('on');
+    clearTimeout(timer);
+    timer = setTimeout(() => flash.classList.remove('on'), 800);
+  };
+  const render = () => {
+    const nav = app.extras.enabled;
+    el.hidden = !nav;
+    lock.hidden = !app.extras.locked;
+    video.textContent = app.extras.video ? '▶︎ Video mode: ON' : 'Video mode: off';
+    video.classList.toggle('on', app.extras.video);
+  };
+  app.on('action', (cmd) => show(BADGE_ACTIONS[cmd.action] || cmd.action));
+  app.on('extras-gesture', (g) => show(g.label === 'locked' ? '🔒' : '🔓 unlocked'));
+  app.on('extras-changed', render);
+  app.on('profile-changed', render);
+  render();
+}
 
 return {  };
 })();
